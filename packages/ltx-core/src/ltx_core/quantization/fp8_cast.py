@@ -1,3 +1,5 @@
+import functools
+
 import torch
 
 from ltx_core.loader.module_ops import ModuleOps
@@ -7,9 +9,23 @@ from ltx_core.model.transformer.model import LTXModel
 BLOCK_SIZE = 1024
 
 
+@functools.lru_cache(maxsize=1)
+def _gpu_supports_triton_fp8() -> bool:
+    """Triton fp8e4nv requires Ada Lovelace (SM 8.9) or newer."""
+    if not torch.cuda.is_available():
+        return False
+    major, minor = torch.cuda.get_device_capability()
+    return major > 8 or (major == 8 and minor >= 9)
+
+
 def calculate_weight_float8(target_weights: torch.Tensor, original_weights: torch.Tensor) -> torch.Tensor:
-    result = _fused_add_round_launch(target_weights, original_weights, seed=0).to(target_weights.dtype)
-    target_weights.copy_(result, non_blocking=True)
+    if _gpu_supports_triton_fp8():
+        result = _fused_add_round_launch(target_weights, original_weights, seed=0).to(target_weights.dtype)
+        target_weights.copy_(result, non_blocking=True)
+    else:
+        # Ampere fallback: plain PyTorch upcast + add (no stochastic rounding)
+        result = (target_weights + original_weights.to(dtype=torch.bfloat16)).to(original_weights.dtype)
+        target_weights.copy_(result.to(target_weights.dtype), non_blocking=True)
     return target_weights
 
 
@@ -60,7 +76,7 @@ def _upcast_and_round(
     Upcast the weight to the given dtype and optionally apply stochastic rounding.
     Input weight needs to have float8_e4m3fn or float8_e5m2 dtype.
     """
-    if not with_stochastic_rounding:
+    if not with_stochastic_rounding or not _gpu_supports_triton_fp8():
         return weight.to(dtype)
     return _fused_add_round_launch(torch.zeros_like(weight, dtype=dtype), weight, seed)
 

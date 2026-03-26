@@ -116,6 +116,13 @@ class FlashAttention3(AttentionCallable):
         return out
 
 
+# Module-level singletons: reuse the same instances to avoid Dynamo recompilation.
+# These classes are stateless, so sharing a single instance is safe.
+_pytorch_attn = PytorchAttention()
+_xformers_attn = XFormersAttention() if memory_efficient_attention is not None else None
+_flash_attn = FlashAttention3() if flash_attn_interface is not None else None
+
+
 class AttentionFunction(Enum):
     PYTORCH = "pytorch"
     XFORMERS = "xformers"
@@ -126,17 +133,17 @@ class AttentionFunction(Enum):
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: int, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self is AttentionFunction.PYTORCH:
-            return PytorchAttention()(q, k, v, heads, mask)
+            return _pytorch_attn(q, k, v, heads, mask)
         elif self is AttentionFunction.XFORMERS:
-            return XFormersAttention()(q, k, v, heads, mask)
+            return _xformers_attn(q, k, v, heads, mask)
         elif self is AttentionFunction.FLASH_ATTENTION_3:
-            return FlashAttention3()(q, k, v, heads, mask)
+            return _flash_attn(q, k, v, heads, mask)
         else:
             # Default behavior: XFormers if installed else - PyTorch
             return (
-                XFormersAttention()(q, k, v, heads, mask)
-                if memory_efficient_attention is not None
-                else PytorchAttention()(q, k, v, heads, mask)
+                _xformers_attn(q, k, v, heads, mask)
+                if _xformers_attn is not None
+                else _pytorch_attn(q, k, v, heads, mask)
             )
 
 
